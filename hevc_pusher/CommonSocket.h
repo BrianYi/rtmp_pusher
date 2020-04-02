@@ -12,6 +12,8 @@
 class CommonSocket
 {
 public:
+	SOCKET m_socketID;
+public:
     CommonSocket(INT32 inSocketType, INT32 inProtocol, IOType inIOType = Blocking);
     ~CommonSocket();
 	void setIOType(IOType inIOType);
@@ -25,7 +27,6 @@ protected:
     void close();
     void bind_to_port(const USHORT& inPort);
 protected:
-    SOCKET m_socketID;
     INT32 m_socketType;
     INT32 m_protocol;
     BOOL m_opened;

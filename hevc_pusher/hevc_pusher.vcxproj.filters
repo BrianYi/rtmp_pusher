@@ -10,13 +10,10 @@
     <ClCompile Include="hevc_pusher.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="include\librtmp\log.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="TCP.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="UDP.cpp">
+    <ClCompile Include="Log.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -30,13 +27,13 @@
     <ClInclude Include="CommonSocket.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\librtmp\log.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="TCP.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="UDP.h">
+    <ClInclude Include="Log.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Packet.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

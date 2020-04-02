@@ -11,8 +11,8 @@
 #include <intsafe.h>
 #include <stdio.h>
 
-const UINT32 RECV_BUF_SIZE = /*10 * 1024u;*/1444;
-const UINT32 SEND_BUF_SIZE = /*10 * 1024u;*/1444;
+const UINT32 RECV_BUF_SIZE = 10 * 1024u;
+const UINT32 SEND_BUF_SIZE = 10 * 1024u;
 const INT32 MAX_CONNECTION_NUM = 32;
 
 enum IOType
@@ -20,3 +20,11 @@ enum IOType
     Blocking    = 0,
     NonBlocking = 1
 };
+
+// stdafx.hÎÄ¼þ
+#ifdef _DEBUG
+#define _CRTDBG_MAP_ALLOC
+#include <stdlib.h>
+#include <crtdbg.h>
+#define new new(_NORMAL_BLOCK, __FILE__, __LINE__)
+#endif

@@ -14,7 +14,7 @@ class TCP :
 public:
     TCP();
     TCP(const TCP& inTCP);
-	~TCP();
+	~TCP( );
 	void listen_on_port(const USHORT& inPort);
 	INT32 connect_to(const Address& inAddress);
 	INT32 connect_to(const std::string& inIP, const USHORT& inPort);
