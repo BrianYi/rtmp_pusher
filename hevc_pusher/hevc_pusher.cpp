@@ -27,11 +27,7 @@ extern "C" {
 #pragma comment(lib, "ffmpeg/avcodec.lib")
 #pragma comment(lib, "ffmpeg/avutil.lib")
 
-#pragma comment(linker, "/SUBSYSTEM:windows /ENTRY:mainCRTStartup")
-
-#define STREAM_CHANNEL_METADATA  0x03
-#define STREAM_CHANNEL_VIDEO     0x04
-#define STREAM_CHANNEL_AUDIO     0x05
+//#pragma comment(linker, "/SUBSYSTEM:windows /ENTRY:mainCRTStartup")
 
 #define SERVER_IP "192.168.1.104"
 #define SERVER_PORT 5566
@@ -59,6 +55,7 @@ struct STREAMING_PUSHER
 	StreamInfo stream;
 	std::mutex mux;
 	std::string filePath;
+	StatisticInfo stat;
 };
 
 bool init_sockets( )
@@ -95,6 +92,14 @@ stopStreaming( STREAMING_PUSHER * pusher )
 	}
 }
 
+inline fd_set get_fd_set( STREAMING_PUSHER* pusher )
+{
+	fd_set fdSet;
+	FD_ZERO( &fdSet );
+	FD_SET( pusher->conn.m_socketID, &fdSet );
+	return fdSet;
+}
+
 int thread_func_for_sender( void *arg )
 {
 	RTMP_Log(RTMP_LOGDEBUG, "sender thread is start..." );
@@ -106,6 +111,7 @@ int thread_func_for_sender( void *arg )
 	StreamData& streamData = pusher->stream.streamData;
 	int64_t currentTime = 0, waitTime = 0;
 	size_t bodySize, packSize;
+
 	while ( pusher->state == STREAMING_START )
 	{
 		if ( streamData.empty( ) )
@@ -125,28 +131,22 @@ int thread_func_for_sender( void *arg )
 		packSize = PACK_SIZE_H( ptrPkt->header );
 
 		if ( waitTime > 0 ) Sleep( waitTime );
-		int MP = ptrPkt->header.MP;
-		send_push_packet( pusher->conn, *ptrPkt );
-		free_packet( ptrPkt );
-		while ( MP )
+		timeval tm{0,100};
+		fd_set fdSet = get_fd_set( pusher );
+		while ( select( 0, nullptr, &fdSet, nullptr, &tm ) <= 0 && 
+				pusher->state == STREAMING_START)
 		{
-			lock.lock( );
-			ptrPkt = streamData.front( );
-			streamData.pop( );
-			lock.unlock( );
-			MP = ptrPkt->header.MP;
-			while ( send_push_packet( pusher->conn, *ptrPkt ) <= 0 )
-				;
-			free_packet( ptrPkt );
-		}
-
-// #ifdef _DEBUG
-// 			RTMP_Log( RTMP_LOGDEBUG, "throw out packet! packet timestamp=%lld, current timestamp=%lld, diff=%lld",
-// 					  ptrPkt->header.timestamp, currentTime, ptrPkt->header.timestamp - currentTime );
-// 
-// 			RTMP_LogHexStr( RTMP_LOGDEBUG, ( uint8_t * ) ptrPkt, packSize );
-// #endif // _DEBUG
+			fdSet = get_fd_set( pusher );
+			Sleep( 10 );
+		};
+		if ( send_push_packet( pusher->conn, *ptrPkt ) <= 0 )
+			break; // error
+#ifdef _DEBUG
+		caculate_statistc( pusher->stat, *ptrPkt, StatSend );
+#endif // _DEBUG
+		free_packet( ptrPkt );
 	};
+	send_fin_packet( pusher->conn, get_current_milli( ), pusher->stream.app.c_str( ) );
 	RTMP_Log(RTMP_LOGDEBUG, "sender thread is quit." );
 	return true;
 }
@@ -156,22 +156,26 @@ int thread_func_for_reader( void *arg )
 	RTMP_Log(RTMP_LOGDEBUG, "reader thread is start..." );
 	STREAMING_PUSHER *pusher = ( STREAMING_PUSHER * ) arg;
 
+	fd_set fdSet = get_fd_set( pusher );
+	timeval tm; // 设置超时时间
+	tm.tv_sec = 0;
+	tm.tv_usec = 100;
 	while ( true )
 	{
-		if ( send_createStream_packet( pusher->conn,
-											 get_current_milli( ),
-											 pusher->stream.app.c_str( ),
-											 pusher->stream.timebase ) <= 0 )
+		while ( select( 0, nullptr, &fdSet, nullptr, &tm ) <= 0 )
 		{
-			Sleep( 100 );
-			continue;
+			fdSet = get_fd_set( pusher );
+			Sleep( 10 );
 		}
-
-		Sleep( 10 );	// wait for packet comming
+		send_createStream_packet( pusher->conn,
+								  get_current_milli( ),
+								  pusher->stream.app.c_str( ),
+								  pusher->stream.timebase );
+		//Sleep( 10 );	// wait for packet comming
 
 		// recv ack
 		PACKET pkt;
-		if ( recv_packet( pusher->conn, pkt, NonBlocking ) <= 0)
+		if ( recv_packet( pusher->conn, pkt ) <= 0 )
 		{
 			Sleep( 10 );
 			continue;
@@ -181,7 +185,6 @@ int thread_func_for_reader( void *arg )
 		{
 			break;
 		}
-		Sleep( 100 );
 	}
 
 	AVFormatContext *pFmtCtx = avformat_alloc_context( );
@@ -255,6 +258,31 @@ int thread_func_for_reader( void *arg )
 	return true;
 }
 
+void show_statistics( STREAMING_PUSHER* pusher )
+{
+	printf( "%-15s%-6s%-8s%-10s %-8s\t\t%-13s\t%-10s\t%-15s\t %-8s\t%-13s\t%-10s\t%-15s\n",
+			"ip", "port", "type", "app",
+			"rec-byte", "rec-byte-rate", "rec-packet", "rec-packet-rate",
+			"snd-byte", "snd-byte-rate", "snd-packet", "snd-packet-rate" );
+
+
+	printf( "%-15s%-6d%-8s%-10s %-6.2fMB\t\t%-9.2fKB/s\t%-10lld\t%-13lld/s\t %-6.2fMB\t%-9.2fKB/s\t%-10lld\t%-13lld/s\n",
+			pusher->conn.getIP( ).c_str( ),
+			pusher->conn.getPort( ),
+			"Pusher",
+			pusher->stream.app.c_str(),
+
+			MB( pusher->stat.recvBytes ),
+			KB( pusher->stat.recvByteRate ),
+			pusher->stat.recvPackets,
+			pusher->stat.recvPacketRate,
+
+			MB( pusher->stat.sendBytes ),
+			KB( pusher->stat.sendByteRate ),
+			pusher->stat.sendPackets,
+			pusher->stat.sendPacketRate );
+}
+
 int thread_func_for_controller( void *arg )
 {
 	RTMP_Log(RTMP_LOGDEBUG, "controller thread is start..." );
@@ -262,16 +290,19 @@ int thread_func_for_controller( void *arg )
 	char ich;
 	while ( pusher->state == STREAMING_START )
 	{
-		ich = getchar( );
-		switch ( ich )
-		{
-		case 'q':
-			RTMP_Log(RTMP_LOGDEBUG, "Exiting" );
-			stopStreaming( pusher );
-			break;
-		default:
-			RTMP_Log(RTMP_LOGDEBUG, "Unknown command \'%c\', ignoring", ich );
-		}
+		system( "cls" );
+		show_statistics( pusher );
+		Sleep( 1000 );
+// 		ich = getchar( );
+// 		switch ( ich )
+// 		{
+// 		case 'q':
+// 			RTMP_Log(RTMP_LOGDEBUG, "Exiting" );
+// 			stopStreaming( pusher );
+// 			break;
+// 		default:
+// 			RTMP_Log(RTMP_LOGDEBUG, "Unknown command \'%c\', ignoring", ich );
+// 		}
 	}
 	RTMP_Log(RTMP_LOGDEBUG, "controller thread is quit." );
 	return true;
@@ -298,8 +329,14 @@ int thread_func_for_aliver( void *arg )
 	return true;
 }
 
-int main( )
+int main( int argc, char* argv[] )
 {
+	if ( argc < 3 )
+	{
+		printf( "please pass in live name and file path parameter.\n" );
+		printf( "usage: pusher \"live-name\" \"/path/to/file\" \n" );
+		return 0;
+	}
 #ifdef _DEBUG
 	FILE* dumpfile = fopen( "hevc_pusher.dump", "a+" );
 	RTMP_LogSetOutput( dumpfile );
@@ -322,9 +359,10 @@ int main( )
 
 	STREAMING_PUSHER *pusher = new STREAMING_PUSHER;
 	pusher->state = STREAMING_START;
-	pusher->stream.app = "live";
-	pusher->filePath = "E:\\Movie\\test video\\bbb_sunflower_1080p_60fps_normal.mp4";
-	pusher->stream.timebase = 1000 / 40;
+	pusher->stream.app = argv[1]; // "live"
+	pusher->filePath = argv[2]; // "E:\\Movie\\test video\\small_bunny_1080p_60fps.mp4"
+	pusher->stream.timebase = 1000 / 25;
+	ZeroMemory( &pusher->stat, sizeof StatisticInfo );
 	while ( 0 != pusher->conn.connect_to( SERVER_IP, SERVER_PORT ) )
 	{
 		Sleep( 1000 );
@@ -336,12 +374,13 @@ int main( )
 #endif // _DEBUG
 	std::thread sender( thread_func_for_sender, pusher );
 	std::thread reader( thread_func_for_reader, pusher );
-	std::thread aliver( thread_func_for_aliver, pusher );
-	//std::thread controller( thread_func_for_controller, pusher );
+	//std::thread aliver( thread_func_for_aliver, pusher );
+	std::thread controller( thread_func_for_controller, pusher );
 
 	sender.join( );
 	reader.join( );
-	aliver.join( );
+	controller.join( );
+	//aliver.join( );
 #ifdef _DEBUG
 	RTMP_LogThreadStop( );
 #endif // _DEBUG
