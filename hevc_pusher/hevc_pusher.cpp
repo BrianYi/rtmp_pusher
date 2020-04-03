@@ -7,12 +7,14 @@
 #include <string>
 #include <queue>
 #include <mutex>
+#define TIME_CACULATE
 #include "Packet.h"
 #include "Log.h"
 
 extern "C" {
 #include "libavformat/avformat.h"
 #include "libavcodec/avcodec.h"
+#include "libavutil/error.h"
 }
 
 // win socket
@@ -29,7 +31,7 @@ extern "C" {
 
 //#pragma comment(linker, "/SUBSYSTEM:windows /ENTRY:mainCRTStartup")
 
-#define SERVER_IP "192.168.1.104"
+#define SERVER_IP "192.168.1.105"
 #define SERVER_PORT 5566
 
 enum
@@ -130,7 +132,17 @@ int thread_func_for_sender( void *arg )
 		bodySize = BODY_SIZE_H( ptrPkt->header );
 		packSize = PACK_SIZE_H( ptrPkt->header );
 
+#ifdef _DEBUG
+		TIME_BEG( 1 );
+#endif // _DEBUG
 		if ( waitTime > 0 ) Sleep( waitTime );
+#ifdef _DEBUG
+		TIME_END( 1 );
+#endif
+
+#ifdef _DEBUG
+			TIME_BEG( 2 ); //1124ms 1235ms
+#endif // _DEBUG
 		timeval tm{0,100};
 		fd_set fdSet = get_fd_set( pusher );
 		while ( select( 0, nullptr, &fdSet, nullptr, &tm ) <= 0 && 
@@ -139,14 +151,20 @@ int thread_func_for_sender( void *arg )
 			fdSet = get_fd_set( pusher );
 			Sleep( 10 );
 		};
+
 		if ( send_push_packet( pusher->conn, *ptrPkt ) <= 0 )
+		{
+			RTMP_LogAndPrintf( RTMP_LOGDEBUG, "send push packet error %s:%d", __FUNCTION__, __LINE__ );
 			break; // error
+		}
 #ifdef _DEBUG
 		caculate_statistc( pusher->stat, *ptrPkt, StatSend );
 #endif // _DEBUG
 		free_packet( ptrPkt );
+#ifdef _DEBUG
+		TIME_END( 2 );
+#endif // _DEBUG
 	};
-	send_fin_packet( pusher->conn, get_current_milli( ), pusher->stream.app.c_str( ) );
 	RTMP_Log(RTMP_LOGDEBUG, "sender thread is quit." );
 	return true;
 }
@@ -157,10 +175,9 @@ int thread_func_for_reader( void *arg )
 	STREAMING_PUSHER *pusher = ( STREAMING_PUSHER * ) arg;
 
 	fd_set fdSet = get_fd_set( pusher );
-	timeval tm; // 设置超时时间
-	tm.tv_sec = 0;
-	tm.tv_usec = 100;
-	while ( true )
+	timeval tm{0,100}; // 设置超时时间
+	int isAck = false;
+	while ( !isAck )
 	{
 		while ( select( 0, nullptr, &fdSet, nullptr, &tm ) <= 0 )
 		{
@@ -171,102 +188,166 @@ int thread_func_for_reader( void *arg )
 								  get_current_milli( ),
 								  pusher->stream.app.c_str( ),
 								  pusher->stream.timebase );
-		//Sleep( 10 );	// wait for packet comming
-
 		// recv ack
 		PACKET pkt;
 		if ( recv_packet( pusher->conn, pkt ) <= 0 )
-		{
-			Sleep( 10 );
 			continue;
-		}
-
-		if ( pkt.header.type == Ack )
+		switch ( pkt.header.type )
 		{
+		case Ack:
+			printf( "Begin to push stream.\n" );
+			isAck = true;
 			break;
+		case Err:
+			printf( "Already has a stream name is %s.\n", pkt.header.app );
+			break;
+		default:
+			printf( "unknown packet.\n" );
 		}
 	}
 
-	AVFormatContext *pFmtCtx = avformat_alloc_context( );
-	if ( avformat_open_input( &pFmtCtx, pusher->filePath.c_str(), 
-							  NULL, NULL ) != 0 )
-		return 0;
-
-	if ( avformat_find_stream_info( pFmtCtx, NULL ) < 0 )
-		return 0;
-	AVStream *st = pFmtCtx->streams[ 0 ];
-	AVCodec *pCodec = avcodec_find_decoder( st->codecpar->codec_id );
-	AVCodecContext *pCodecCtx = avcodec_alloc_context3( pCodec );
-	if ( !pCodecCtx )
-		return -1;
-	if ( !pCodec )
-		return -1;
-
-	if ( avcodec_parameters_to_context( pCodecCtx, st->codecpar ) < 0 )
-		return -1;
-	if ( avcodec_open2( pCodecCtx, pCodec, NULL ) < 0 )
-		return -1;
+// 	AVFormatContext *pFmtCtx = avformat_alloc_context( );
+// 	if ( avformat_open_input( &pFmtCtx, pusher->filePath.c_str(), 
+// 							  NULL, NULL ) != 0 )
+// 		return 0;
+// 
+// 	if ( avformat_find_stream_info( pFmtCtx, NULL ) < 0 )
+// 		return 0;
+// 	AVStream *st = pFmtCtx->streams[ 0 ];
+// 	AVCodec *pCodec = avcodec_find_decoder( st->codecpar->codec_id );
+// 	AVCodecContext *pCodecCtx = avcodec_alloc_context3( pCodec );
+// 	if ( !pCodecCtx )
+// 		return -1;
+// 	if ( !pCodec )
+// 		return -1;
+// 
+// 	if ( avcodec_parameters_to_context( pCodecCtx, st->codecpar ) < 0 )
+// 		return -1;
+// 	if ( avcodec_open2( pCodecCtx, pCodec, NULL ) < 0 )
+// 		return -1;
 
 	StreamInfo& stream = pusher->stream;
-	AVPacket pkt;		// ffmpeg packet
-	av_init_packet( &pkt );
 	PACKET* ptrPkt;	// my packet
 	int time_interval = pusher->stream.timebase;
 	int64_t lastSendTime = 0, currentTime = 0;
 	int64_t nextSendTime = get_current_milli( );
 	int64_t waitTime = 0;
 	int32_t maxSendBuf = SEND_BUF_SIZE;
-	while ( av_read_frame( pFmtCtx, &pkt ) >= 0 )
+// 	AVPacket packet;		// ffmpeg packet
+// 	AVFrame frame;
+	int response = 0;
+	FILE *fd = fopen( pusher->filePath.c_str(), "rb" );
+	if ( !fd )
 	{
+		RTMP_LogAndPrintf( RTMP_LOGDEBUG, "open file %s failed.", pusher->filePath.c_str( ) );
+		stopStreaming( pusher );
+		return -1;
+	}
+	char buf[ MAX_BODY_SIZE * 50 ];
+	int32_t readBytes = 0;
+	while ( !feof(fd) )
+	{
+#ifdef _DEBUG
+		TIME_BEG( 3 );
+#endif // _DEBUG
+		readBytes = fread( buf, sizeof *buf, sizeof buf, fd );
 		currentTime = get_current_milli( );
 		waitTime = nextSendTime - currentTime;
 		if ( waitTime > 0 )
 			Sleep( waitTime );
 		else
-			nextSendTime = currentTime; 
+			nextSendTime = currentTime;
 		lastSendTime = nextSendTime;
 		nextSendTime = lastSendTime + time_interval;
-
-		int numPack = NUM_PACK( pkt.size );
+#ifdef _DEBUG
+		TIME_END( 3 );
+#endif // _DEBUG
+		int numPack = NUM_PACK( readBytes );
 		std::unique_lock<std::mutex> lock( pusher->mux );
-		if ( maxSendBuf < pkt.size )
+#ifdef _DEBUG
+		TIME_BEG( 4 );
+#endif // _DEBUG
+		if ( maxSendBuf < readBytes )
 		{
-			maxSendBuf = (pkt.size + MAX_PACKET_SIZE - 1) / MAX_PACKET_SIZE * MAX_PACKET_SIZE;
+			maxSendBuf = ( readBytes + MAX_PACKET_SIZE - 1 ) / MAX_PACKET_SIZE * MAX_PACKET_SIZE;
 			pusher->conn.set_socket_sndbuf_size( maxSendBuf );
 		}
 		for ( int i = 0; i < numPack; ++i )
 		{
-			ptrPkt = alloc_push_packet( pkt.size,
-										i != numPack-1,
+			ptrPkt = alloc_push_packet( readBytes,
+										i != numPack - 1,
 										i * MAX_BODY_SIZE,
 										nextSendTime,
 										stream.app.c_str( ),
-										( char * ) pkt.data + i * MAX_BODY_SIZE );
+										( char * ) buf + i * MAX_BODY_SIZE );
 
 			stream.streamData.push( ptrPkt );
 		}
+#ifdef _DEBUG
+		TIME_END( 4 );
+#endif // _DEBUG
 	}
+	fclose( fd );
+// 	while ( av_read_frame( pFmtCtx, ptrPacket ) >= 0 )
+// 	{
+// 		if ( ptrPacket->stream_index != st->index ) continue;
+// 		if ( avcodec_send_packet( pCodecCtx, ptrPacket ) < 0 ) break;
+// 		while ( response = avcodec_receive_frame( pCodecCtx, ptrFrame ) >= 0 )
+// 		{
+// 			if ( response == AVERROR( EAGAIN ) || response == AVERROR_EOF )
+// 				break;
+// 
+// 
+// 			currentTime = get_current_milli( );
+// 			waitTime = nextSendTime - currentTime;
+// 			if ( waitTime > 0 )
+// 				Sleep( waitTime );
+// 			else
+// 				nextSendTime = currentTime;
+// 			lastSendTime = nextSendTime;
+// 			nextSendTime = lastSendTime + time_interval;
+// 
+// 			int numPack = NUM_PACK( ptrFrame->width );
+// 			std::unique_lock<std::mutex> lock( pusher->mux );
+// 			if ( maxSendBuf < pkt.size )
+// 			{
+// 				maxSendBuf = ( pkt.size + MAX_PACKET_SIZE - 1 ) / MAX_PACKET_SIZE * MAX_PACKET_SIZE;
+// 				pusher->conn.set_socket_sndbuf_size( maxSendBuf );
+// 			}
+// 			for ( int i = 0; i < numPack; ++i )
+// 			{
+// 				ptrPkt = alloc_push_packet( pkt.size,
+// 											i != numPack - 1,
+// 											i * MAX_BODY_SIZE,
+// 											nextSendTime,
+// 											stream.app.c_str( ),
+// 											( char * ) ptrFrame.data + i * MAX_BODY_SIZE );
+// 
+// 				stream.streamData.push( ptrPkt );
+// 			}
+// 		}
+// 	}
 	nextSendTime += time_interval;
 
 	ptrPkt = alloc_fin_packet( nextSendTime, stream.app.c_str( ) );
 	stream.streamData.push( ptrPkt );
 	Sleep( 100 );
 	stopStreaming( pusher );
-	avformat_close_input( &pFmtCtx );
-	avformat_free_context( pFmtCtx );
+// 	avformat_close_input( &pFmtCtx );
+// 	avformat_free_context( pFmtCtx );
 	RTMP_Log(RTMP_LOGDEBUG, "reader thread is quit." );
 	return true;
 }
 
 void show_statistics( STREAMING_PUSHER* pusher )
 {
-	printf( "%-15s%-6s%-8s%-10s %-8s\t\t%-13s\t%-10s\t%-15s\t %-8s\t%-13s\t%-10s\t%-15s\n",
+	printf( "%-15s%-6s%-8s%-20s %-8s\t\t%-13s\t%-10s\t%-15s\t %-8s\t%-13s\t%-10s\t%-15s\n",
 			"ip", "port", "type", "app",
 			"rec-byte", "rec-byte-rate", "rec-packet", "rec-packet-rate",
 			"snd-byte", "snd-byte-rate", "snd-packet", "snd-packet-rate" );
 
 
-	printf( "%-15s%-6d%-8s%-10s %-6.2fMB\t\t%-9.2fKB/s\t%-10lld\t%-13lld/s\t %-6.2fMB\t%-9.2fKB/s\t%-10lld\t%-13lld/s\n",
+	printf( "%-15s%-6d%-8s%-20s %-6.2fMB\t\t%-9.2fKB/s\t%-10lld\t%-13lld/s\t %-6.2fMB\t%-9.2fKB/s\t%-10lld\t%-13lld/s\n",
 			pusher->conn.getIP( ).c_str( ),
 			pusher->conn.getPort( ),
 			"Pusher",
@@ -287,7 +368,6 @@ int thread_func_for_controller( void *arg )
 {
 	RTMP_Log(RTMP_LOGDEBUG, "controller thread is start..." );
 	STREAMING_PUSHER *pusher = ( STREAMING_PUSHER * ) arg;
-	char ich;
 	while ( pusher->state == STREAMING_START )
 	{
 		system( "cls" );
@@ -308,26 +388,26 @@ int thread_func_for_controller( void *arg )
 	return true;
 }
 
-int thread_func_for_aliver( void *arg )
-{
-	RTMP_Log( RTMP_LOGDEBUG, "cleaner thread is start..." );
-	STREAMING_PUSHER* pusher = ( STREAMING_PUSHER* ) arg;
-	StreamInfo& streamInfo = pusher->stream;
-	while ( pusher->state == STREAMING_START )
-	{
-		// deal with temp connections
-		// send heart packet
-		std::unique_lock<std::mutex> lock( pusher->mux );
-		send_alive_packet( pusher->conn,
-						   get_current_milli( ),
-						   streamInfo.app.c_str( ) );
-		lock.unlock( );
-
-		Sleep( 1000 );
-	}
-	RTMP_Log( RTMP_LOGDEBUG, "cleaner thread is quit." );
-	return true;
-}
+// int thread_func_for_aliver( void *arg )
+// {
+// 	RTMP_Log( RTMP_LOGDEBUG, "cleaner thread is start..." );
+// 	STREAMING_PUSHER* pusher = ( STREAMING_PUSHER* ) arg;
+// 	StreamInfo& streamInfo = pusher->stream;
+// 	while ( pusher->state == STREAMING_START )
+// 	{
+// 		// deal with temp connections
+// 		// send heart packet
+// 		std::unique_lock<std::mutex> lock( pusher->mux );
+// 		send_alive_packet( pusher->conn,
+// 						   get_current_milli( ),
+// 						   streamInfo.app.c_str( ) );
+// 		lock.unlock( );
+// 
+// 		Sleep( 1000 );
+// 	}
+// 	RTMP_Log( RTMP_LOGDEBUG, "cleaner thread is quit." );
+// 	return true;
+// }
 
 int main( int argc, char* argv[] )
 {
@@ -338,7 +418,11 @@ int main( int argc, char* argv[] )
 		return 0;
 	}
 #ifdef _DEBUG
-	FILE* dumpfile = fopen( "hevc_pusher.dump", "a+" );
+	FILE* dumpfile = nullptr;
+	if ( argv[ 3 ] )
+		dumpfile = fopen( argv[ 3 ], "a+" );
+	else
+		dumpfile = fopen( "hevc_pusher.dump", "a+" );
 	RTMP_LogSetOutput( dumpfile );
 	RTMP_LogSetLevel( RTMP_LOGALL );
 	RTMP_LogThreadStart( );
@@ -365,6 +449,7 @@ int main( int argc, char* argv[] )
 	ZeroMemory( &pusher->stat, sizeof StatisticInfo );
 	while ( 0 != pusher->conn.connect_to( SERVER_IP, SERVER_PORT ) )
 	{
+		printf( "Connect to server %s:%d failed.\n", SERVER_IP, SERVER_PORT );
 		Sleep( 1000 );
 		continue;
 	}
