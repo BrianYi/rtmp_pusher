@@ -1,5 +1,7 @@
-// hevc_rtmp_test.cpp : This file contains the 'main' function. Program execution begins and ends there.
-//
+/*
+ * Copyright (C) 2020 BrianYi, All rights reserved
+ */
+
 #include <winsock2.h>
 #include <iostream>
 #include <vector>
